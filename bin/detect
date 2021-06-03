@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+# https://devcenter.heroku.com/articles/buildpack-api#bin-detect
+# bin/detect <build-dir>
+
+echo "Snipe-IT"
+exit 0

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+
+# https://devcenter.heroku.com/articles/buildpack-api#bin-compile
+# bin/compile <build-dir> <cache-dir> <env-dir>
+
+source "$(cd $(dirname "${0}"); cd ..; pwd)/bin/util/common.sh"
+
+BUILD_DIR="${1}"
+CACHE_DIR="${2}"
+ENV_DIR="${3}"
+
+# fail hard
+set -o pipefail
+# fail harder
+set -eu
+# move hidden files too, just in case
+# shopt -s dotglob
+
+# Export the environment
+export_env_dir "${ENV_DIR}"
+
+if [ -z "${SNIPE_IT_URL:-}" ]; then
+  if [ -n "${SNIPE_IT_VERSION:-}" ]; then
+    echo "SNIPE_IT_VERSION: ${SNIPE_IT_VERSION}"
+    SNIPE_IT_URL="https://github.com/snipe/snipe-it/archive/refs/tags/${SNIPE_IT_VERSION}.tar.gz"
+  else
+    SNIPE_IT_URL="https://github.com/snipe/snipe-it"
+  fi
+fi
+echo "SNIPE_IT_URL: ${SNIPE_IT_URL}"
+
+case "${SNIPE_IT_URL}" in
+  *.tar.gz | *.tgz)
+    SNIPE_IT_TGZ="${CACHE_DIR}/snipe-it-$(echo "${SNIPE_IT_URL}" | sed 's:.*/::')"
+
+    # Download the archive if necessary
+    [ -f "${SNIPE_IT_TGZ}" ] || wget -c "${SNIPE_IT_URL}" -O "$SNIPE_IT_TGZ"
+  ;;
+
+  *)
+    SNIPE_IT_GIT_DIR="${CACHE_DIR}/snipe-it.git"
+    SNIPE_IT_GIT_URL=$(echo "${SNIPE_IT_URL}#" | cut -d'#' -f1)
+    SNIPE_IT_GIT_REF=$(echo "${SNIPE_IT_URL}#" | cut -d'#' -f2)
+
+    # Clone the repository if necessary
+    [ -d "${SNIPE_IT_GIT_DIR}" ] || git clone "${SNIPE_IT_URL}" "${SNIPE_IT_GIT_DIR}"
+
+    SNIPE_IT_GIT_REF_DEFAULT=$(cd "${SNIPE_IT_GIT_DIR}" && git symbolic-ref 'refs/remotes/origin/HEAD' | sed 's@^refs/remotes/origin/@@')
+    SNIPE_IT_GIT_REF=${SNIPE_IT_GIT_REF:-$SNIPE_IT_GIT_REF_DEFAULT}
+
+    # Checkout the git ref
+    (cd "${SNIPE_IT_GIT_DIR}" && git fetch && git checkout "${SNIPE_IT_GIT_REF}")
+
+    SNIPE_IT_GIT_SHA_SHORT=$(cd "${SNIPE_IT_GIT_DIR}" && git rev-parse --verify --short HEAD)
+    SNIPE_IT_TGZ_NAME="snipe-it-${SNIPE_IT_GIT_REF}"
+    SNIPE_IT_TGZ_DIR="${CACHE_DIR}/${SNIPE_IT_TGZ_NAME}"
+    SNIPE_IT_TGZ="${SNIPE_IT_TGZ_DIR}.tar.gz"
+
+    # Create the archive file if necessary
+    if [ ! -f "${SNIPE_IT_TGZ}" ]; then
+      rm -rf "${SNIPE_IT_TGZ_DIR}"
+      cp -a "${SNIPE_IT_GIT_DIR}" "${SNIPE_IT_TGZ_DIR}"
+      rm -rf "${SNIPE_IT_TGZ_DIR}/.git"
+      (cd "${CACHE_DIR}" && tar -czf "${SNIPE_IT_TGZ_NAME}.tar.gz" "${SNIPE_IT_TGZ_NAME}")
+      rm -rf "${SNIPE_IT_TGZ_DIR}"
+    fi
+  ;;
+esac
+
+# Extract the archive
+mkdir "${BUILD_DIR}/snipe-it"
+tar -x -z -f "${SNIPE_IT_TGZ}" --strip-components=1 -C "${BUILD_DIR}/snipe-it"
+
+# Install composer dependencies
+boolean "${SKIP_COMPOSER_INSTALL:-}" || (
+  cd "${BUILD_DIR}/snipe-it"
+  composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+)
+
+# Make sure the heroku/buildpack will work
+[ ! -f "${BUILD_DIR}/composer.json" ] || echo '{}' > "${BUILD_DIR}/composer.json"
